@@ -1,77 +1,124 @@
-################################################################################
-# Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above copyright
-#    notice, this list of conditions and the following disclaimer in the
-#    documentation and/or other materials provided with the distribution.
-#  * Neither the name of NVIDIA CORPORATION nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
-# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
-# PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-# PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
-# OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#
-################################################################################
-#
-# Makefile project only supported on Mac OS X and Linux Platforms)
-#
-################################################################################
+# Makefile for CUDA NPP Batch TIFF Image Rotation
+# Compatible with Linux and can be adapted for Windows
 
-# Define the compiler and flags
-NVCC = /usr/local/cuda/bin/nvcc
-CXX = g++
-CXXFLAGS = -std=c++11 -I/usr/local/cuda/include -Iinclude
-LDFLAGS = -L/usr/local/cuda/lib64 -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc
+# CUDA Toolkit location
+CUDA_PATH ?= /usr/local/cuda
 
-# Define directories
-SRC_DIR = src
-BIN_DIR = bin
-DATA_DIR = data
-LIB_DIR = lib
+# Architecture - adjust based on your GPU
+# Common values: 50,52,60,61,70,75,80,86
+SMS ?= 50 52 60 61 70 75 80 86
 
-# Define source files and target executable
-SRC = $(SRC_DIR)/imageRotationNPP.cpp
-TARGET = $(BIN_DIR)/imageRotationNPP
+# Compiler settings
+HOST_COMPILER ?= g++
+NVCC := $(CUDA_PATH)/bin/nvcc -ccbin $(HOST_COMPILER)
 
-# Define the default rule
-all: $(TARGET)
+# Target executable name
+TARGET := batchRotateTIFF
 
-# Rule for building the target executable
-$(TARGET): $(SRC)
-	mkdir -p $(BIN_DIR)
-	$(NVCC) $(CXXFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+# Directories
+SRCDIR := src
+OBJDIR := obj
+BINDIR := bin
+INCDIR := include
 
-# Rule for running the application
-run: $(TARGET)
-	./$(TARGET) --input $(DATA_DIR)/Lena.png --output $(DATA_DIR)/Lena_rotated.png
+# NPP and CUDA samples common directory (adjust path as needed)
+CUDA_SAMPLES_PATH ?= $(CUDA_PATH)/samples
+COMMON_INC := $(CUDA_SAMPLES_PATH)/common/inc
 
-# Clean up
+# Include paths
+INCLUDES := -I$(CUDA_PATH)/include
+INCLUDES += -I$(INCDIR)
+INCLUDES += -I$(COMMON_INC)
+INCLUDES += -I$(CUDA_SAMPLES_PATH)/7_CUDALibraries/common/UtilNPP
+INCLUDES += -I$(CUDA_SAMPLES_PATH)/7_CUDALibraries/common/FreeImage/include
+
+# Library paths
+LIBRARIES := -L$(CUDA_PATH)/lib64
+LIBRARIES += -L$(CUDA_SAMPLES_PATH)/7_CUDALibraries/common/FreeImage/lib/linux/x86_64
+
+# Libraries to link
+LIBS := -lcudart -lnppc -lnppi -lnppig -lnppif -lnppist -lfreeimage
+
+# Compiler flags
+NVCCFLAGS := -std=c++11
+CXXFLAGS := -std=c++11 -O3
+
+# Generate SASS code for each architecture
+$(foreach sm,$(SMS),$(eval GENCODE_FLAGS += -gencode arch=compute_$(sm),code=sm_$(sm)))
+
+# Generate PTX code for the highest architecture
+HIGHEST_SM := $(lastword $(sort $(SMS)))
+GENCODE_FLAGS += -gencode arch=compute_$(HIGHEST_SM),code=compute_$(HIGHEST_SM)
+
+# Source files
+SOURCES := $(SRCDIR)/batchRotate.cpp
+
+# Object files
+OBJECTS := $(OBJDIR)/batchRotate.o
+
+# Default target
+all: directories $(BINDIR)/$(TARGET)
+
+# Create necessary directories
+directories:
+	@mkdir -p $(OBJDIR)
+	@mkdir -p $(BINDIR)
+	@mkdir -p output
+	@mkdir -p logs
+
+# Link executable
+$(BINDIR)/$(TARGET): $(OBJECTS)
+	$(NVCC) $(GENCODE_FLAGS) -o $@ $^ $(LIBRARIES) $(LIBS)
+	@echo "Build complete: $@"
+
+# Compile source files
+$(OBJDIR)/%.o: $(SRCDIR)/%.cpp
+	$(NVCC) $(NVCCFLAGS) $(GENCODE_FLAGS) $(INCLUDES) -o $@ -c $<
+
+# Clean build files
 clean:
-	rm -rf $(BIN_DIR)/*
+	rm -rf $(OBJDIR) $(BINDIR)
+	@echo "Clean complete"
 
-# Installation rule (not much to install, but here for completeness)
-install:
-	@echo "No installation required."
+# Clean everything including output
+cleanall: clean
+	rm -rf output/* logs/*
+	@echo "All generated files removed"
 
-# Help command
+# Run with default parameters
+run: all
+	./$(BINDIR)/$(TARGET) -input data -output output -angle 45
+
+# Run with custom parameters
+# Usage: make run-custom INPUT=path/to/images OUTPUT=path/to/output ANGLE=30
+run-custom: all
+	./$(BINDIR)/$(TARGET) -input $(INPUT) -output $(OUTPUT) -angle $(ANGLE)
+
+# Display help
 help:
-	@echo "Available make commands:"
-	@echo "  make        - Build the project."
-	@echo "  make run    - Run the project."
-	@echo "  make clean  - Clean up the build files."
-	@echo "  make install- Install the project (if applicable)."
-	@echo "  make help   - Display this help message."
+	@echo "Available targets:"
+	@echo "  all (default) - Build the project"
+	@echo "  clean         - Remove object and binary files"
+	@echo "  cleanall      - Remove all generated files including output"
+	@echo "  run           - Build and run with default parameters"
+	@echo "  run-custom    - Build and run with custom parameters"
+	@echo "                  Usage: make run-custom INPUT=path OUTPUT=path ANGLE=45"
+	@echo "  help          - Display this help message"
+	@echo ""
+	@echo "Environment variables:"
+	@echo "  CUDA_PATH          - Path to CUDA toolkit (default: /usr/local/cuda)"
+	@echo "  CUDA_SAMPLES_PATH  - Path to CUDA samples (default: CUDA_PATH/samples)"
+	@echo "  SMS                - Target GPU architectures (default: 50 52 60 61 70 75 80 86)"
+	@echo "  HOST_COMPILER      - Host C++ compiler (default: g++)"
+
+# Check CUDA installation
+check:
+	@echo "Checking CUDA installation..."
+	@echo "CUDA_PATH: $(CUDA_PATH)"
+	@echo "NVCC: $(NVCC)"
+	@which nvcc || echo "NVCC not found in PATH"
+	@echo "Target architectures: $(SMS)"
+	@echo "Include paths: $(INCLUDES)"
+	@echo "Library paths: $(LIBRARIES)"
+
+.PHONY: all clean cleanall run run-custom help check directories
