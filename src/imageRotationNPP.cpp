@@ -1,12 +1,28 @@
-/* rotate.cpp
+/* Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
  *
- * Completed NPP image rotation example.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *  * Neither the name of NVIDIA CORPORATION nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
  *
- * Build (example, adjust include/lib paths for your system):
- *   nvcc -std=c++11 -I/path/to/NPP/include -I/path/to/CUDA/samples/common/inc \
- *        rotate.cpp -L/path/to/NPP/lib -lnppif -lnppig -lnppc -lcudart -o rotate
- *
- * (Or use the CUDA samples Makefile from the CUDA template.)
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #if defined(WIN32) || defined(_WIN32) || defined(WIN64) || defined(_WIN64)
@@ -24,7 +40,9 @@
 #include <string.h>
 #include <fstream>
 #include <iostream>
-#include <cmath>
+#include <vector>
+#include <filesystem>
+#include <chrono>
 
 #include <cuda_runtime.h>
 #include <npp.h>
@@ -32,18 +50,7 @@
 #include <helper_cuda.h>
 #include <helper_string.h>
 
-// Simple NPP error check macro
-#define NPP_CHECK_NPP(call)                                                   \
-    do                                                                        \
-    {                                                                         \
-        NppStatus _status = call;                                             \
-        if (_status != NPP_SUCCESS)                                           \
-        {                                                                     \
-            std::cerr << "NPP error at " << __FILE__ << ":" << __LINE__      \
-                      << " code=" << _status << " (" #call ")" << std::endl;  \
-            exit(EXIT_FAILURE);                                               \
-        }                                                                     \
-    } while (0)
+namespace fs = std::filesystem;
 
 bool printfNPPinfo(int argc, char *argv[])
 {
@@ -52,7 +59,7 @@ bool printfNPPinfo(int argc, char *argv[])
     printf("NPP Library Version %d.%d.%d\n", libVer->major, libVer->minor,
            libVer->build);
 
-    int driverVersion = 0, runtimeVersion = 0;
+    int driverVersion, runtimeVersion;
     cudaDriverGetVersion(&driverVersion);
     cudaRuntimeGetVersion(&runtimeVersion);
 
@@ -66,54 +73,95 @@ bool printfNPPinfo(int argc, char *argv[])
     return bVal;
 }
 
-// compute bounding box for rotating a rectangle of width w and height h by angle degrees
-static void computeRotateBoundingBox(int w, int h, double angleDegrees, int &outW, int &outH)
+std::vector<std::string> getImageFiles(const std::string& directory, const std::string& extension)
 {
-    const double a = angleDegrees * (M_PI / 180.0);
-    double ca = std::cos(a);
-    double sa = std::sin(a);
-
-    // Coordinates of four corners relative to origin (0,0)
-    // We'll rotate around the center later. For bbox size only absolute extents matter:
-    double hw = w / 2.0;
-    double hh = h / 2.0;
-
-    // Four corners centered at origin
-    double cornersX[4] = { -hw, hw, hw, -hw };
-    double cornersY[4] = { -hh, -hh, hh, hh };
-
-    double minx = 1e30, miny = 1e30, maxx = -1e30, maxy = -1e30;
-
-    for (int i = 0; i < 4; ++i)
-    {
-        double x = cornersX[i];
-        double y = cornersY[i];
-        double xr = x * ca - y * sa;
-        double yr = x * sa + y * ca;
-        if (xr < minx) minx = xr;
-        if (xr > maxx) maxx = xr;
-        if (yr < miny) miny = yr;
-        if (yr > maxy) maxy = yr;
+    std::vector<std::string> imageFiles;
+    
+    try {
+        if (fs::exists(directory) && fs::is_directory(directory)) {
+            for (const auto& entry : fs::recursive_directory_iterator(directory)) {
+                if (entry.is_regular_file()) {
+                    std::string filepath = entry.path().string();
+                    std::string ext = entry.path().extension().string();
+                    
+                    // Convert extension to lowercase for comparison
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    
+                    if (ext == extension) {
+                        imageFiles.push_back(filepath);
+                    }
+                }
+            }
+        }
+    } catch (const fs::filesystem_error& e) {
+        std::cerr << "Filesystem error: " << e.what() << std::endl;
     }
+    
+    return imageFiles;
+}
 
-    // width and height of bounding box
-    outW = static_cast<int>(std::ceil(maxx - minx));
-    outH = static_cast<int>(std::ceil(maxy - miny));
+bool processImage(const std::string& inputPath, const std::string& outputPath, double angle)
+{
+    try {
+        std::cout << "Processing: " << inputPath << std::endl;
+        
+        // Load image (NPP supports PGM, PPM, and with proper libraries, TIFF)
+        npp::ImageCPU_8u_C1 oHostSrc;
+        npp::loadImage(inputPath, oHostSrc);
+        
+        // Upload to device
+        npp::ImageNPP_8u_C1 oDeviceSrc(oHostSrc);
 
-    // Make sure sizes are at least 1
-    if (outW < 1) outW = 1;
-    if (outH < 1) outH = 1;
+        // Create ROI structures
+        NppiSize oSrcSize = {(int)oDeviceSrc.width(), (int)oDeviceSrc.height()};
+        NppiPoint oSrcOffset = {0, 0};
+
+        // Calculate bounding box for rotated image
+        NppiRect oBoundingBox;
+        NPP_CHECK_NPP(nppiGetRotateBound(oSrcSize, angle, &oBoundingBox));
+
+        // Allocate device memory for output
+        npp::ImageNPP_8u_C1 oDeviceDst(oBoundingBox.width, oBoundingBox.height);
+
+        // Set rotation center (center of image)
+        NppiPoint oRotationCenter = {(int)(oSrcSize.width / 2), (int)(oSrcSize.height / 2)};
+
+        // Perform rotation
+        NPP_CHECK_NPP(nppiRotate_8u_C1R(
+            oDeviceSrc.data(), oSrcSize, oDeviceSrc.pitch(), oSrcOffset,
+            oDeviceDst.data(), oDeviceDst.pitch(), oBoundingBox, angle, 
+            oRotationCenter, NPPI_INTER_LINEAR));
+
+        // Copy result back to host
+        npp::ImageCPU_8u_C1 oHostDst(oDeviceDst.size());
+        oDeviceDst.copyTo(oHostDst.data(), oHostDst.pitch());
+
+        // Save output image
+        saveImage(outputPath, oHostDst);
+        std::cout << "  Saved: " << outputPath << std::endl;
+
+        // Cleanup
+        nppiFree(oDeviceSrc.data());
+        nppiFree(oDeviceDst.data());
+
+        return true;
+    }
+    catch (npp::Exception &rException) {
+        std::cerr << "  NPP Exception: " << rException << std::endl;
+        return false;
+    }
+    catch (...) {
+        std::cerr << "  Unknown exception occurred" << std::endl;
+        return false;
+    }
 }
 
 int main(int argc, char *argv[])
 {
-    printf("%s Starting...\n\n", (argc > 0 ? argv[0] : "rotate"));
+    printf("%s Starting...\n\n", argv[0]);
 
     try
     {
-        std::string sFilename;
-        char *filePath = nullptr;
-
         findCudaDevice(argc, (const char **)argv);
 
         if (printfNPPinfo(argc, argv) == false)
@@ -121,142 +169,145 @@ int main(int argc, char *argv[])
             exit(EXIT_SUCCESS);
         }
 
-        if (checkCmdLineFlag(argc, (const char **)argv, "input"))
-        {
-            getCmdLineArgumentString(argc, (const char **)argv, "input", &filePath);
-        }
-        else
-        {
-            filePath = sdkFindFilePath("Lena.pgm", argv[0]);
-        }
+        // Configuration
+        std::string inputDir = "data/aerials";
+        std::string outputDir = "output";
+        std::string extension = ".tiff";
+        double angle = 45.0;
 
-        if (filePath)
+        // Parse command line arguments
+        if (checkCmdLineFlag(argc, (const char **)argv, "input-dir"))
         {
-            sFilename = filePath;
-        }
-        else
-        {
-            sFilename = "Lena.pgm";
+            char *inputDirPath;
+            getCmdLineArgumentString(argc, (const char **)argv, "input-dir", &inputDirPath);
+            inputDir = inputDirPath;
         }
 
-        // if we specify the filename at the command line, then we only test
-        // sFilename[0].
-        int file_errors = 0;
-        std::ifstream infile(sFilename.data(), std::ifstream::in);
-
-        if (infile.good())
+        if (checkCmdLineFlag(argc, (const char **)argv, "output-dir"))
         {
-            std::cout << "nppiRotate opened: <" << sFilename.data()
-                      << "> successfully!" << std::endl;
-            file_errors = 0;
-            infile.close();
-        }
-        else
-        {
-            std::cout << "nppiRotate unable to open: <" << sFilename.data() << ">"
-                      << std::endl;
-            file_errors++;
-            infile.close();
+            char *outputDirPath;
+            getCmdLineArgumentString(argc, (const char **)argv, "output-dir", &outputDirPath);
+            outputDir = outputDirPath;
         }
 
-        if (file_errors > 0)
+        if (checkCmdLineFlag(argc, (const char **)argv, "angle"))
         {
-            exit(EXIT_FAILURE);
+            angle = getCmdLineArgumentFloat(argc, (const char **)argv, "angle");
         }
 
-        std::string sResultFilename = sFilename;
-
-        std::string::size_type dot = sResultFilename.rfind('.');
-
-        if (dot != std::string::npos)
+        if (checkCmdLineFlag(argc, (const char **)argv, "extension"))
         {
-            sResultFilename = sResultFilename.substr(0, dot);
+            char *ext;
+            getCmdLineArgumentString(argc, (const char **)argv, "extension", &ext);
+            extension = ext;
+            if (extension[0] != '.') {
+                extension = "." + extension;
+            }
         }
 
-        sResultFilename += "_rotate.pgm";
+        // Create output directory if it doesn't exist
+        fs::create_directories(outputDir);
 
-        if (checkCmdLineFlag(argc, (const char **)argv, "output"))
-        {
-            char *outputFilePath = nullptr;
-            getCmdLineArgumentString(argc, (const char **)argv, "output",
-                                     &outputFilePath);
-            if (outputFilePath)
-                sResultFilename = outputFilePath;
+        // Get all image files
+        std::cout << "Scanning directory: " << inputDir << std::endl;
+        std::cout << "Looking for files with extension: " << extension << std::endl;
+        std::vector<std::string> imageFiles = getImageFiles(inputDir, extension);
+
+        if (imageFiles.empty()) {
+            std::cout << "No images found with extension " << extension << " in " << inputDir << std::endl;
+            std::cout << "\nTrying alternative extensions..." << std::endl;
+            
+            // Try common image extensions
+            std::vector<std::string> extensions = {".pgm", ".ppm", ".jpg", ".png", ".bmp"};
+            for (const auto& ext : extensions) {
+                imageFiles = getImageFiles(inputDir, ext);
+                if (!imageFiles.empty()) {
+                    extension = ext;
+                    std::cout << "Found " << imageFiles.size() << " images with " << ext << " extension" << std::endl;
+                    break;
+                }
+            }
+            
+            if (imageFiles.empty()) {
+                std::cerr << "No supported image files found!" << std::endl;
+                exit(EXIT_FAILURE);
+            }
         }
 
-        // declare a host image object for an 8-bit grayscale image
-        npp::ImageCPU_8u_C1 oHostSrc;
-        // load gray-scale image from disk
-        npp::loadImage(sFilename, oHostSrc);
-        // declare a device image and copy construct from the host image,
-        // i.e. upload host to device
-        npp::ImageNPP_8u_C1 oDeviceSrc(oHostSrc);
+        std::cout << "\nFound " << imageFiles.size() << " image(s) to process\n" << std::endl;
+        std::cout << "Rotation angle: " << angle << " degrees\n" << std::endl;
 
-        // create struct with the ROI size
-        NppiSize oSrcSize = {(int)oDeviceSrc.width(), (int)oDeviceSrc.height()};
-        NppiPoint oSrcOffset = {0, 0};
-        NppiSize oSizeROI = {(int)oDeviceSrc.width(), (int)oDeviceSrc.height()};
+        // Process statistics
+        int successCount = 0;
+        int failCount = 0;
+        auto startTime = std::chrono::high_resolution_clock::now();
 
-        // rotation parameters
-        double angle = 45.0; // Rotation angle in degrees
+        // Process each image
+        for (size_t i = 0; i < imageFiles.size(); ++i) {
+            std::cout << "\n[" << (i+1) << "/" << imageFiles.size() << "] ";
+            
+            std::string inputPath = imageFiles[i];
+            fs::path inPath(inputPath);
+            
+            // Create output filename
+            std::string outputFilename = inPath.stem().string() + "_rotated" + inPath.extension().string();
+            std::string outputPath = outputDir + "/" + outputFilename;
 
-        // Calculate the bounding box of the rotated image (manual)
-        int dstW = 0, dstH = 0;
-        computeRotateBoundingBox(oSrcSize.width, oSrcSize.height, angle, dstW, dstH);
-        // ensure odd/even or other constraints are satisfied if needed
+            auto imgStartTime = std::chrono::high_resolution_clock::now();
+            bool success = processImage(inputPath, outputPath, angle);
+            auto imgEndTime = std::chrono::high_resolution_clock::now();
+            
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(imgEndTime - imgStartTime);
+            std::cout << "  Time: " << duration.count() << " ms" << std::endl;
 
-        // allocate device image for the rotated image
-        npp::ImageNPP_8u_C1 oDeviceDst(dstW, dstH);
+            if (success) {
+                successCount++;
+            } else {
+                failCount++;
+            }
+        }
 
-        // Set the rotation point (center of the source image)
-        NppiPoint oRotationCenter = {(int)(oSrcSize.width / 2), (int)(oSrcSize.height / 2)};
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto totalDuration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
-        // For destination we need to set a destination ROI offset which determines
-        // where source center maps to. To rotate around image center and place
-        // the rotated image centered in destination, compute dest center:
-        NppiPoint oDstOffset = {0, 0};
-        // If you want the rotated image centered inside the destination buffer,
-        // compute translation to center it:
-        int dstCenterX = dstW / 2;
-        int dstCenterY = dstH / 2;
-        int srcCenterX = oRotationCenter.x;
-        int srcCenterY = oRotationCenter.y;
+        // Print summary
+        std::cout << "\n" << std::string(50, '=') << std::endl;
+        std::cout << "PROCESSING SUMMARY" << std::endl;
+        std::cout << std::string(50, '=') << std::endl;
+        std::cout << "Total images processed: " << imageFiles.size() << std::endl;
+        std::cout << "Successful: " << successCount << std::endl;
+        std::cout << "Failed: " << failCount << std::endl;
+        std::cout << "Total time: " << totalDuration.count() << " ms" << std::endl;
+        std::cout << "Average time per image: " << (imageFiles.size() > 0 ? totalDuration.count() / imageFiles.size() : 0) << " ms" << std::endl;
+        std::cout << "Output directory: " << outputDir << std::endl;
+        std::cout << std::string(50, '=') << std::endl;
 
-        // The NPP rotate function uses the rotation center in source coordinates,
-        // and writes into the destination ROI. To center the rotated image we
-        // set the destination ROI so that the source center maps to the dest center.
-        // That means dest ROI origin should be (dstCenter - srcCenter)
-        oDstOffset.x = dstCenterX - srcCenterX;
-        oDstOffset.y = dstCenterY - srcCenterY;
+        // Write log file
+        std::string logPath = outputDir + "/processing_log.txt";
+        std::ofstream logFile(logPath);
+        if (logFile.is_open()) {
+            logFile << "NPP Image Rotation Processing Log\n";
+            logFile << "==================================\n\n";
+            logFile << "Date: " << __DATE__ << " " << __TIME__ << "\n";
+            logFile << "Input directory: " << inputDir << "\n";
+            logFile << "Output directory: " << outputDir << "\n";
+            logFile << "Rotation angle: " << angle << " degrees\n";
+            logFile << "Extension filter: " << extension << "\n\n";
+            logFile << "Results:\n";
+            logFile << "  Total images: " << imageFiles.size() << "\n";
+            logFile << "  Successful: " << successCount << "\n";
+            logFile << "  Failed: " << failCount << "\n";
+            logFile << "  Total time: " << totalDuration.count() << " ms\n";
+            logFile << "  Average time: " << (imageFiles.size() > 0 ? totalDuration.count() / imageFiles.size() : 0) << " ms\n\n";
+            logFile << "Processed files:\n";
+            for (const auto& file : imageFiles) {
+                logFile << "  - " << file << "\n";
+            }
+            logFile.close();
+            std::cout << "Log file saved: " << logPath << std::endl;
+        }
 
-        // Ensure offset is non-negative and within destination image (NPP will clip)
-        if (oDstOffset.x < 0) oDstOffset.x = 0;
-        if (oDstOffset.y < 0) oDstOffset.y = 0;
-
-        // build destination ROI rectangle (full destination)
-        NppiRect oBoundingBox;
-        oBoundingBox.x = 0;
-        oBoundingBox.y = 0;
-        oBoundingBox.width = dstW;
-        oBoundingBox.height = dstH;
-
-        // run the rotation
-        // Use nearest-neighbor interpolation (NPPI_INTER_NN) as in original example.
-        NPP_CHECK_NPP(nppiRotate_8u_C1R(
-            oDeviceSrc.data(), oSrcSize, oDeviceSrc.pitch(), oSrcOffset,
-            oDeviceDst.data(), oDeviceDst.pitch(), oBoundingBox, angle, oRotationCenter,
-            NPPI_INTER_NN));
-
-        // declare a host image for the result
-        npp::ImageCPU_8u_C1 oHostDst(oDeviceDst.size());
-        // and copy the device result data into it
-        oDeviceDst.copyTo(oHostDst.data(), oHostDst.pitch());
-
-        saveImage(sResultFilename, oHostDst);
-        std::cout << "Saved image: " << sResultFilename << std::endl;
-
-        // Let destructors release GPU memory (don't call nppiFree on members)
-        exit(EXIT_SUCCESS);
+        exit(failCount == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
     }
     catch (npp::Exception &rException)
     {
@@ -272,7 +323,6 @@ int main(int argc, char *argv[])
         std::cerr << "Aborting." << std::endl;
 
         exit(EXIT_FAILURE);
-        return -1;
     }
 
     return 0;
