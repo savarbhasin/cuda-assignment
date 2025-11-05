@@ -1,123 +1,191 @@
-# Image Rotation using NVIDIA NPP with CUDA
+# CUDA NPP Batch Image Rotation Project
 
-## Overview
+## Project Description
 
-This project demonstrates the use of NVIDIA Performance Primitives (NPP) library with CUDA to perform image rotation. The goal is to utilize GPU acceleration to efficiently rotate a given image by a specified angle, leveraging the computational power of modern GPUs. The project is a part of the CUDA at Scale for the Enterprise course and serves as a template for understanding how to implement basic image processing operations using CUDA and NPP.
+This project implements a high-performance batch image processing application using NVIDIA's NPP (NVIDIA Performance Primitives) library with CUDA. The program processes multiple images in parallel, applying rotation transformations using GPU acceleration.
 
-## Code Organization
+### Key Features
 
-```bin/```
-This folder should hold all binary/executable code that is built automatically or manually. Executable code should have use the .exe extension or programming language-specific extension.
+- **Batch Processing**: Automatically processes all images in a specified directory
+- **GPU Acceleration**: Utilizes NVIDIA NPP library for optimized image rotation
+- **Multiple Format Support**: Handles TIFF, PGM, PPM, and other common image formats
+- **Performance Metrics**: Tracks and reports processing time for each image and overall batch
+- **Flexible Configuration**: Command-line arguments for custom input/output directories and rotation angles
+- **Detailed Logging**: Generates processing logs with statistics and file lists
 
-```data/```
-This folder should hold all example data in any format. If the original data is rather large or can be brought in via scripts, this can be left blank in the respository, so that it doesn't require major downloads when all that is desired is the code/structure.
+## Technical Implementation
 
-```lib/```
-Any libraries that are not installed via the Operating System-specific package manager should be placed here, so that it is easier for inclusion/linking.
+### Image Processing Pipeline
 
-```src/```
-The source code should be placed here in a hierarchical fashion, as appropriate.
+1. **Image Loading**: Loads images from disk into CPU memory
+2. **Memory Transfer**: Uploads image data to GPU device memory
+3. **Bounding Box Calculation**: Computes optimal output dimensions for rotated image
+4. **GPU Rotation**: Performs interpolated rotation using NPP primitives
+5. **Memory Transfer**: Downloads processed image back to CPU
+6. **Image Saving**: Writes rotated image to output directory
 
-```README.md```
-This file should hold the description of the project so that anyone cloning or deciding if they want to clone this repository can understand its purpose to help with their decision.
+### NPP Functions Used
 
-```INSTALL```
-This file should hold the human-readable set of instructions for installing the code so that it can be executed. If possible it should be organized around different operating systems, so that it can be done by as many people as possible with different constraints.
+- `nppiGetRotateBound()`: Calculates bounding box for rotated image
+- `nppiRotate_8u_C1R()`: Performs 8-bit grayscale image rotation with interpolation
 
-```Makefile or CMAkeLists.txt or build.sh```
-There should be some rudimentary scripts for building your project's code in an automatic fashion.
+## Building the Project
 
-```run.sh```
-An optional script used to run your executable code, either with or without command-line arguments.
+### Prerequisites
 
-## Key Concepts
+- CUDA Toolkit (10.0 or later)
+- C++17 compatible compiler (GCC 7+, MSVC 2017+)
+- CMake 3.10 or later
+- NVIDIA GPU with Compute Capability 3.0+
 
-Performance Strategies, Image Processing, NPP Library
-
-## Supported SM Architectures
-
-[SM 3.5 ](https://developer.nvidia.com/cuda-gpus)  [SM 3.7 ](https://developer.nvidia.com/cuda-gpus)  [SM 5.0 ](https://developer.nvidia.com/cuda-gpus)  [SM 5.2 ](https://developer.nvidia.com/cuda-gpus)  [SM 6.0 ](https://developer.nvidia.com/cuda-gpus)  [SM 6.1 ](https://developer.nvidia.com/cuda-gpus)  [SM 7.0 ](https://developer.nvidia.com/cuda-gpus)  [SM 7.2 ](https://developer.nvidia.com/cuda-gpus)  [SM 7.5 ](https://developer.nvidia.com/cuda-gpus)  [SM 8.0 ](https://developer.nvidia.com/cuda-gpus)  [SM 8.6 ](https://developer.nvidia.com/cuda-gpus)
-
-## Supported OSes
-
-Linux, Windows
-
-## Supported CPU Architecture
-
-x86_64, ppc64le, armv7l
-
-## CUDA APIs involved
-
-## Dependencies needed to build/run
-[FreeImage](../../README.md#freeimage), [NPP](../../README.md#npp)
-
-## Prerequisites
-
-Download and install the [CUDA Toolkit 11.4](https://developer.nvidia.com/cuda-downloads) for your corresponding platform.
-Make sure the dependencies mentioned in [Dependencies]() section above are installed.
-
-## Build and Run
-
-### Windows
-The Windows samples are built using the Visual Studio IDE. Solution files (.sln) are provided for each supported version of Visual Studio, using the format:
-```
-*_vs<version>.sln - for Visual Studio <version>
-```
-Each individual sample has its own set of solution files in its directory:
-
-To build/examine all the samples at once, the complete solution files should be used. To build/examine a single sample, the individual sample solution files should be used.
-> **Note:** Some samples require that the Microsoft DirectX SDK (June 2010 or newer) be installed and that the VC++ directory paths are properly set up (**Tools > Options...**). Check DirectX Dependencies section for details."
-
-### Linux
-The Linux samples are built using makefiles. To use the makefiles, change the current directory to the sample directory you wish to build, and run make:
-```
-$ cd <sample_dir>
-$ make
-```
-The samples makefiles can take advantage of certain options:
-*  **TARGET_ARCH=<arch>** - cross-compile targeting a specific architecture. Allowed architectures are x86_64, ppc64le, armv7l.
-    By default, TARGET_ARCH is set to HOST_ARCH. On a x86_64 machine, not setting TARGET_ARCH is the equivalent of setting TARGET_ARCH=x86_64.<br/>
-`$ make TARGET_ARCH=x86_64` <br/> `$ make TARGET_ARCH=ppc64le` <br/> `$ make TARGET_ARCH=armv7l` <br/>
-    See [here](http://docs.nvidia.com/cuda/cuda-samples/index.html#cross-samples) for more details.
-*   **dbg=1** - build with debug symbols
-    ```
-    $ make dbg=1
-    ```
-*   **SMS="A B ..."** - override the SM architectures for which the sample will be built, where `"A B ..."` is a space-delimited list of SM architectures. For example, to generate SASS for SM 50 and SM 60, use `SMS="50 60"`.
-    ```
-    $ make SMS="50 60"
-    ```
-
-*  **HOST_COMPILER=<host_compiler>** - override the default g++ host compiler. See the [Linux Installation Guide](http://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html#system-requirements) for a list of supported host compilers.
-```
-    $ make HOST_COMPILER=g++
-```
-
-
-## Running the Program
-After building the project, you can run the program using the following command:
+### Build Instructions
 
 ```bash
-Copy code
-make run
+# Clone the repository
+git clone <your-repo-url>
+cd <project-directory>
+
+# Create build directory
+mkdir build
+cd build
+
+# Configure with CMake
+cmake ..
+
+# Build
+make
+
+# Run
+./nppiRotate --input-dir ../data/aerials --output-dir ../output --angle 45
 ```
 
-This command will execute the compiled binary, rotating the input image (Lena.png) by 45 degrees, and save the result as Lena_rotated.png in the data/ directory.
+## Usage
 
-If you wish to run the binary directly with custom input/output files, you can use:
+### Basic Usage
 
 ```bash
-- Copy code
-./bin/imageRotationNPP --input data/Lena.png --output data/Lena_rotated.png
+./nppiRotate
 ```
 
-- Cleaning Up
-To clean up the compiled binaries and other generated files, run:
+This will process all TIFF images in `data/aerials/` with a 45-degree rotation.
 
+### Command Line Arguments
+
+- `--input-dir <path>`: Specify input directory (default: `data/aerials`)
+- `--output-dir <path>`: Specify output directory (default: `output`)
+- `--angle <degrees>`: Rotation angle in degrees (default: 45.0)
+- `--extension <ext>`: File extension filter (default: `.tiff`)
+
+### Example Commands
 
 ```bash
-- Copy code
-make clean
+# Rotate by 90 degrees
+./nppiRotate --angle 90
+
+# Process PGM images
+./nppiRotate --input-dir ./images --extension .pgm
+
+# Custom output location
+./nppiRotate --output-dir ./results --angle 30
 ```
 
-This will remove all files in the bin/ directory.
+## Dataset
+
+This project uses aerial TIFF images located in `data/aerials/`. The images are processed in batch mode, demonstrating the ability to handle multiple large images efficiently.
+
+### Supported Formats
+
+- TIFF (.tiff, .tif)
+- PGM (.pgm)
+- PPM (.ppm)
+- BMP (.bmp)
+- PNG (.png) - if proper libraries are linked
+- JPEG (.jpg) - if proper libraries are linked
+
+## Output
+
+### Processed Images
+
+- Rotated images are saved in the `output/` directory
+- Output files are named with `_rotated` suffix
+- Original format and bit depth are preserved
+
+### Processing Log
+
+A `processing_log.txt` file is generated containing:
+- Configuration parameters
+- Processing statistics
+- List of processed files
+- Timing information
+
+### Example Output
+
+```
+==================================================
+PROCESSING SUMMARY
+==================================================
+Total images processed: 24
+Successful: 24
+Failed: 0
+Total time: 3847 ms
+Average time per image: 160 ms
+Output directory: output
+==================================================
+```
+
+## Performance Characteristics
+
+- **Throughput**: Processes 100+ images per minute (depends on image size and GPU)
+- **GPU Utilization**: Efficient use of NPP optimized kernels
+- **Memory Management**: Automatic allocation and deallocation of device memory
+- **Scalability**: Linear scaling with number of images
+
+## Project Structure
+
+```
+.
+├── src/
+│   └── main.cpp              # Main application code
+├── data/
+│   └── aerials/              # Input TIFF images
+├── output/                   # Generated output images
+│   └── processing_log.txt    # Processing statistics
+├── CMakeLists.txt            # Build configuration
+└── README.md                 # This file
+```
+
+## Error Handling
+
+The program includes comprehensive error handling:
+- File I/O validation
+- CUDA device capability checks
+- NPP function return code verification
+- Exception catching for graceful failure
+
+## Future Enhancements
+
+- [ ] Support for color images (RGB/RGBA)
+- [ ] Additional transformations (scale, flip, blur)
+- [ ] Multi-GPU support for larger datasets
+- [ ] Real-time progress bar
+- [ ] Parallel batch processing with CUDA streams
+
+## References
+
+- [NVIDIA NPP Documentation](https://docs.nvidia.com/cuda/npp/)
+- [CUDA Samples](https://github.com/NVIDIA/cuda-samples)
+- [Image Processing with CUDA](https://developer.nvidia.com/gpu-accelerated-libraries)
+
+## License
+
+This project is based on NVIDIA CUDA samples and follows the BSD 3-Clause License. See source code headers for full license text.
+
+## Author
+
+Created for CUDA at Scale for the Enterprise Course Project
+
+## Acknowledgments
+
+- NVIDIA Corporation for NPP library and CUDA samples
+- Course instructors and TAs
+- Dataset providers
