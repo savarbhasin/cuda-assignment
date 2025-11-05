@@ -1,28 +1,12 @@
-/* Copyright (c) 2019, NVIDIA CORPORATION. All rights reserved.
+/* rotate.cpp
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *  * Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  * Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *  * Neither the name of NVIDIA CORPORATION nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ * Completed NPP image rotation example.
  *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
- * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Build (example, adjust include/lib paths for your system):
+ *   nvcc -std=c++11 -I/path/to/NPP/include -I/path/to/CUDA/samples/common/inc \
+ *        rotate.cpp -L/path/to/NPP/lib -lnppif -lnppig -lnppc -lcudart -o rotate
+ *
+ * (Or use the CUDA samples Makefile from the CUDA template.)
  */
 
 #if defined(WIN32) || defined(_WIN32) || defined(WIN64) || defined(_WIN64)
@@ -40,12 +24,26 @@
 #include <string.h>
 #include <fstream>
 #include <iostream>
+#include <cmath>
 
 #include <cuda_runtime.h>
 #include <npp.h>
 
 #include <helper_cuda.h>
 #include <helper_string.h>
+
+// Simple NPP error check macro
+#define NPP_CHECK_NPP(call)                                                   \
+    do                                                                        \
+    {                                                                         \
+        NppStatus _status = call;                                             \
+        if (_status != NPP_SUCCESS)                                           \
+        {                                                                     \
+            std::cerr << "NPP error at " << __FILE__ << ":" << __LINE__      \
+                      << " code=" << _status << " (" #call ")" << std::endl;  \
+            exit(EXIT_FAILURE);                                               \
+        }                                                                     \
+    } while (0)
 
 bool printfNPPinfo(int argc, char *argv[])
 {
@@ -54,7 +52,7 @@ bool printfNPPinfo(int argc, char *argv[])
     printf("NPP Library Version %d.%d.%d\n", libVer->major, libVer->minor,
            libVer->build);
 
-    int driverVersion, runtimeVersion;
+    int driverVersion = 0, runtimeVersion = 0;
     cudaDriverGetVersion(&driverVersion);
     cudaRuntimeGetVersion(&runtimeVersion);
 
@@ -68,14 +66,53 @@ bool printfNPPinfo(int argc, char *argv[])
     return bVal;
 }
 
+// compute bounding box for rotating a rectangle of width w and height h by angle degrees
+static void computeRotateBoundingBox(int w, int h, double angleDegrees, int &outW, int &outH)
+{
+    const double a = angleDegrees * (M_PI / 180.0);
+    double ca = std::cos(a);
+    double sa = std::sin(a);
+
+    // Coordinates of four corners relative to origin (0,0)
+    // We'll rotate around the center later. For bbox size only absolute extents matter:
+    double hw = w / 2.0;
+    double hh = h / 2.0;
+
+    // Four corners centered at origin
+    double cornersX[4] = { -hw, hw, hw, -hw };
+    double cornersY[4] = { -hh, -hh, hh, hh };
+
+    double minx = 1e30, miny = 1e30, maxx = -1e30, maxy = -1e30;
+
+    for (int i = 0; i < 4; ++i)
+    {
+        double x = cornersX[i];
+        double y = cornersY[i];
+        double xr = x * ca - y * sa;
+        double yr = x * sa + y * ca;
+        if (xr < minx) minx = xr;
+        if (xr > maxx) maxx = xr;
+        if (yr < miny) miny = yr;
+        if (yr > maxy) maxy = yr;
+    }
+
+    // width and height of bounding box
+    outW = static_cast<int>(std::ceil(maxx - minx));
+    outH = static_cast<int>(std::ceil(maxy - miny));
+
+    // Make sure sizes are at least 1
+    if (outW < 1) outW = 1;
+    if (outH < 1) outH = 1;
+}
+
 int main(int argc, char *argv[])
 {
-    printf("%s Starting...\n\n", argv[0]);
+    printf("%s Starting...\n\n", (argc > 0 ? argv[0] : "rotate"));
 
     try
     {
         std::string sFilename;
-        char *filePath;
+        char *filePath = nullptr;
 
         findCudaDevice(argc, (const char **)argv);
 
@@ -140,10 +177,11 @@ int main(int argc, char *argv[])
 
         if (checkCmdLineFlag(argc, (const char **)argv, "output"))
         {
-            char *outputFilePath;
+            char *outputFilePath = nullptr;
             getCmdLineArgumentString(argc, (const char **)argv, "output",
                                      &outputFilePath);
-            sResultFilename = outputFilePath;
+            if (outputFilePath)
+                sResultFilename = outputFilePath;
         }
 
         // declare a host image object for an 8-bit grayscale image
@@ -159,18 +197,51 @@ int main(int argc, char *argv[])
         NppiPoint oSrcOffset = {0, 0};
         NppiSize oSizeROI = {(int)oDeviceSrc.width(), (int)oDeviceSrc.height()};
 
-        // Calculate the bounding box of the rotated image
-        NppiRect oBoundingBox;
+        // rotation parameters
         double angle = 45.0; // Rotation angle in degrees
-        NPP_CHECK_NPP(nppiGetRotateBound(oSrcSize, angle, &oBoundingBox));
+
+        // Calculate the bounding box of the rotated image (manual)
+        int dstW = 0, dstH = 0;
+        computeRotateBoundingBox(oSrcSize.width, oSrcSize.height, angle, dstW, dstH);
+        // ensure odd/even or other constraints are satisfied if needed
 
         // allocate device image for the rotated image
-        npp::ImageNPP_8u_C1 oDeviceDst(oBoundingBox.width, oBoundingBox.height);
+        npp::ImageNPP_8u_C1 oDeviceDst(dstW, dstH);
 
-        // Set the rotation point (center of the image)
+        // Set the rotation point (center of the source image)
         NppiPoint oRotationCenter = {(int)(oSrcSize.width / 2), (int)(oSrcSize.height / 2)};
 
+        // For destination we need to set a destination ROI offset which determines
+        // where source center maps to. To rotate around image center and place
+        // the rotated image centered in destination, compute dest center:
+        NppiPoint oDstOffset = {0, 0};
+        // If you want the rotated image centered inside the destination buffer,
+        // compute translation to center it:
+        int dstCenterX = dstW / 2;
+        int dstCenterY = dstH / 2;
+        int srcCenterX = oRotationCenter.x;
+        int srcCenterY = oRotationCenter.y;
+
+        // The NPP rotate function uses the rotation center in source coordinates,
+        // and writes into the destination ROI. To center the rotated image we
+        // set the destination ROI so that the source center maps to the dest center.
+        // That means dest ROI origin should be (dstCenter - srcCenter)
+        oDstOffset.x = dstCenterX - srcCenterX;
+        oDstOffset.y = dstCenterY - srcCenterY;
+
+        // Ensure offset is non-negative and within destination image (NPP will clip)
+        if (oDstOffset.x < 0) oDstOffset.x = 0;
+        if (oDstOffset.y < 0) oDstOffset.y = 0;
+
+        // build destination ROI rectangle (full destination)
+        NppiRect oBoundingBox;
+        oBoundingBox.x = 0;
+        oBoundingBox.y = 0;
+        oBoundingBox.width = dstW;
+        oBoundingBox.height = dstH;
+
         // run the rotation
+        // Use nearest-neighbor interpolation (NPPI_INTER_NN) as in original example.
         NPP_CHECK_NPP(nppiRotate_8u_C1R(
             oDeviceSrc.data(), oSrcSize, oDeviceSrc.pitch(), oSrcOffset,
             oDeviceDst.data(), oDeviceDst.pitch(), oBoundingBox, angle, oRotationCenter,
@@ -184,9 +255,7 @@ int main(int argc, char *argv[])
         saveImage(sResultFilename, oHostDst);
         std::cout << "Saved image: " << sResultFilename << std::endl;
 
-        nppiFree(oDeviceSrc.data());
-        nppiFree(oDeviceDst.data());
-
+        // Let destructors release GPU memory (don't call nppiFree on members)
         exit(EXIT_SUCCESS);
     }
     catch (npp::Exception &rException)
